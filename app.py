@@ -89,7 +89,7 @@ config = {
     "sl_buffer_atr": 0.25,
 }
 
-if st.sidebar.button("Refresh Market Data", use_container_width=True):
+if st.sidebar.button("Refresh Market Data", width="stretch"):
     st.cache_data.clear()
 
 # ==========================================
@@ -113,7 +113,6 @@ with tab_chart:
         open_tr = res["open_trade"]
         sigs = res["signals"]
 
-        # Top KPI Metrics
         c1, c2, c3, c4, c5 = st.columns(5)
         c1.metric("Last Price", f"{stats['last_price']:,.4f}" if stats["last_price"] < 200 else f"{stats['last_price']:,.2f}")
         c2.metric("Daily Pivot Bias", stats["bias"])
@@ -121,7 +120,6 @@ with tab_chart:
         c4.metric("Live AI Score (L / S)", f"{stats['bull_ai']:.0f}% / {stats['bear_ai']:.0f}%")
         c5.metric(f"Backtest WR ({stats['total_trades']} tr)", f"{stats['win_rate']:.1f}% | AI Mem: {stats['ai_mem_wr']:.0f}%")
 
-        # Active Trade / Latest Signal Card
         st.subheader("Live Signal Status")
         if open_tr is not None:
             is_long = open_tr["side"] == "LONG"
@@ -155,7 +153,6 @@ with tab_chart:
                 unsafe_allow_html=True,
             )
 
-        # Build Interactive Plotly Chart
         view_start = max(0, len(df) - bars_to_show)
         df_view = df.iloc[view_start:]
         x_vals = list(range(view_start, len(df)))
@@ -175,12 +172,10 @@ with tab_chart:
             )
         )
 
-        # Pivots
         fig.add_trace(go.Scatter(x=x_vals, y=df_view["PP"], name="Daily PP", line=dict(color="gold", width=1.5, dash="dot")))
         fig.add_trace(go.Scatter(x=x_vals, y=df_view["R1"], name="Daily R1", line=dict(color="rgba(255,90,90,0.5)", width=1)))
         fig.add_trace(go.Scatter(x=x_vals, y=df_view["S1"], name="Daily S1", line=dict(color="rgba(0,200,150,0.5)", width=1)))
 
-        # Draw Zones (Daily Buy/Sell + 4H HTF Liquidity)
         def add_zones(zones, fill_color, border_color):
             for z in zones:
                 if z["end"] < view_start:
@@ -202,7 +197,6 @@ with tab_chart:
         add_zones(res["active_htf_ssl"], "rgba(40, 140, 255, 0.16)", "rgba(80, 175, 255, 0.85)")
         add_zones(res["active_htf_bsl"], "rgba(180, 70, 255, 0.16)", "rgba(200, 100, 255, 0.85)")
 
-        # Draw Active Trendlines
         for tl, col, name in [
             (res["active_up_tl"], "#80ff00", "Uptrend Line"),
             (res["active_dn_tl"], "#ff9900", "Downtrend Line"),
@@ -219,7 +213,6 @@ with tab_chart:
                     )
                 )
 
-        # Plot Buy & Sell Signals
         buy_sigs = [s for s in sigs if s["side"] == "BUY" and s["idx"] >= view_start]
         sell_sigs = [s for s in sigs if s["side"] == "SELL" and s["idx"] >= view_start]
 
@@ -250,7 +243,6 @@ with tab_chart:
                 )
             )
 
-        # Plot Active SL/TP Lines if in open trade
         if open_tr is not None:
             x_start = max(open_tr["entry_idx"], view_start)
             fig.add_trace(go.Scatter(x=[x_start, len(df) - 1], y=[open_tr["sl"], open_tr["sl"]], mode="lines", name="Active SL", line=dict(color="#ff4b4b", dash="dash")))
@@ -265,16 +257,15 @@ with tab_chart:
             xaxis=dict(tickvals=x_vals[::tick_step], ticktext=x_labels[::tick_step]),
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
-        # Recent Signals & Closed Trades Table
         col_left, col_right = st.columns(2)
         with col_left:
             st.subheader("Recent Signals Log")
             if sigs:
                 sig_df = pd.DataFrame(sigs[::-1][:15])[["time", "side", "price", "sl", "tp", "ai_score", "reasons"]]
                 sig_df["ai_score"] = sig_df["ai_score"].round(1)
-                st.dataframe(sig_df, use_container_width=True, hide_index=True)
+                st.dataframe(sig_df, width="stretch", hide_index=True)
             else:
                 st.info("No signals triggered with current filters.")
 
@@ -285,7 +276,7 @@ with tab_chart:
                     ["entry_time", "side", "entry", "sl", "tp", "result", "ai_score", "pnl_r"]
                 ]
                 tr_df["ai_score"] = tr_df["ai_score"].round(1)
-                st.dataframe(tr_df, use_container_width=True, hide_index=True)
+                st.dataframe(tr_df, width="stretch", hide_index=True)
             else:
                 st.info("No closed trades yet in this lookback window.")
 
@@ -352,6 +343,6 @@ with tab_scanner:
 
         if rows:
             scan_df = pd.DataFrame(rows).sort_values(by=["Signal", "AI Score %"], ascending=[True, False])
-            st.dataframe(scan_df, use_container_width=True, hide_index=True)
+            st.dataframe(scan_df, width="stretch", hide_index=True)
         else:
             st.warning("No instruments returned data.")
