@@ -41,10 +41,19 @@ def _flatten_yf_df(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
+    for col in ["Open", "High", "Low", "Close"]:
+        if col not in df.columns:
+            return pd.DataFrame()
+    if "Volume" not in df.columns:
+        df["Volume"] = 0.0
     df = df[["Open", "High", "Low", "Close", "Volume"]].copy()
+    df["Volume"] = df["Volume"].fillna(0.0)
     df.dropna(subset=["Open", "High", "Low", "Close"], inplace=True)
+    df.index = pd.to_datetime(df.index)
     if df.index.tz is not None:
         df.index = df.index.tz_localize(None)
+    df.index = df.index.as_unit("ns")
+    df.sort_index(inplace=True)
     return df
 
 
@@ -115,7 +124,6 @@ def run_strategy(
     d["R2"] = d["PP"] + (d["High"] - d["Low"])
     d["S2"] = d["PP"] - (d["High"] - d["Low"])
 
-    # Impulse checks on completed daily bars
     d["PrevO"] = d["Open"].shift(1)
     d["PrevH"] = d["High"].shift(1)
     d["PrevL"] = d["Low"].shift(1)
@@ -132,8 +140,10 @@ def run_strategy(
         & (d["Close"] < d["PrevL"])
     )
 
-    d["date_norm"] = pd.to_datetime(d.index).normalize()
-    ltf_dates = pd.DataFrame({"date_norm": pd.to_datetime(df.index).normalize()})
+    d["date_norm"] = pd.to_datetime(d.index).normalize().as_unit("ns")
+    ltf_dates = pd.DataFrame(
+        {"date_norm": pd.to_datetime(df.index).normalize().as_unit("ns")}
+    )
     merged_d = pd.merge_asof(
         ltf_dates,
         d.reset_index(drop=True)[
@@ -145,7 +155,7 @@ def run_strategy(
         ].sort_values("date_norm"),
         on="date_norm",
         direction="backward",
-        allow_exact_matches=False,  # Strictly prior completed trading day
+        allow_exact_matches=False,
     )
 
     for col in ["PP", "R1", "S1", "R2", "S2"]:
@@ -188,7 +198,7 @@ def run_strategy(
     htf_ptr = 0
 
     # -------------------------------------------------
-    # 3. BAR-BY-BAR SIMULATION (ZONES, TRENDLINES, AI, SIGNALS)
+    # 3. BAR-BY-BAR SIMULATION
     # -------------------------------------------------
     n = len(df)
     times = df.index
@@ -204,25 +214,20 @@ def run_strategy(
     r1s, s1s = df["R1"].values, df["S1"].values
     r2s, s2s = df["R2"].values, df["S2"].values
 
-    # Zone trackers (store dicts with start_idx, end_idx, top, bot, status, type)
     active_dem, closed_dem = [], []
     active_sup, closed_sup = [], []
     active_htf_bsl, closed_htf_bsl = [], []
     active_htf_ssl, closed_htf_ssl = [], []
 
-    # Chart swing liquidity pools
     bsl_pools, ssl_pools = [], []
 
-    # Trendline trackers
     prev_pl, last_pl, active_up_tl, closed_tls = None, None, None, []
     prev_ph, last_ph, active_dn_tl = None, None, None
 
-    # Sweep window trackers
     last_bull_sweep_bar, last_bull_sweep_low = None, None
     last_bear_sweep_bar, last_bear_sweep_high = None, None
 
-    # AI Memory & Trade Simulator
-    ai_memory = []  # tuples of (f1, f2, f3, f4, f5, win_float)
+    ai_memory = []
     open_trade = None
     trades = []
     signals_log = []
@@ -259,7 +264,6 @@ def run_strategy(
         atr = float(atrs[i]) if not np.isnan(atrs[i]) and atrs[i] > 0 else (h - l + 1e-6)
         pp, r1, s1, r2, s2 = pps[i], r1s[i], s1s[i], r2s[i], s2s[i]
 
-        # 0. Check open trade SL / TP exit
         if open_trade is not None:
             hit_sl = (l <= open_trade["sl"]) if open_trade["side"] == "LONG" else (h >= open_trade["sl"])
             hit_tp = (h >= open_trade["tp"]) if open_trade["side"] == "LONG" else (l <= open_trade["tp"])
@@ -276,10 +280,9 @@ def run_strategy(
                     ai_memory.pop(0)
                 open_trade = None
 
-        # A. Daily S/D Zone creation on new day
         day_key = merged_d["date_norm"].iloc[i]
         d_atr = merged_d["dATR"].iloc[i]
-        if day_key != prev_day_key and pd.notna(d_atr) and d_atr > 0:
+        if pd.notna(day_key) and day_key != prev_day_key and pd.notna(d_atr) and d_atr > 0:
             prev_day_key = day_key
             if bool(merged_d["BullImp"].iloc[i]):
                 d1o, d1l, d1c = float(merged_d["Open"].iloc[i]), float(merged_d["Low"].iloc[i]), float(merged_d["Close"].iloc[i])
@@ -323,7 +326,6 @@ def run_strategy(
                 if h >= z["bot"] and c <= z["top"]:
                     in_sell_zone = True
 
-        # B. 4H HTF Liquidity Zones unlock
         while htf_ptr < len(sorted_htf_times) and sorted_htf_times[htf_ptr] <= t:
             for z_type, z_top, z_bot in htf_events[sorted_htf_times[htf_ptr]]:
                 if z_type == "BSL":
@@ -364,7 +366,6 @@ def run_strategy(
                     if l < z["bot"] and c >= z["bot"]:
                         htf_bull_sweep = True
 
-        # C. Dynamic Trendlines
         if i >= 2 * tl_len:
             p_idx = i - tl_len
             if lows[p_idx] == np.min(lows[p_idx - tl_len : p_idx + tl_len + 1]):
@@ -417,7 +418,6 @@ def run_strategy(
                 if h >= tl_p - atr * config["tl_touch_atr"] and c < tl_p:
                     dn_tl_bounce = True
 
-        # D. Chart Swing Liquidity & Pivot Sweeps
         if i >= 2 * sw_len:
             sp = i - sw_len
             if highs[sp] == np.max(highs[sp - sw_len : sp + sw_len + 1]):
@@ -466,7 +466,6 @@ def run_strategy(
         elif last_bear_sweep_bar is not None and c > last_bear_sweep_high:
             last_bear_sweep_bar, last_bear_sweep_high = None, None
 
-        # E. Candlestick Confirmation
         c_range = h - l
         c_body = abs(c - o)
         up_wick = h - max(o, c)
@@ -483,7 +482,6 @@ def run_strategy(
         bull_cnd_ok = bull_pin or bull_eng
         bear_cnd_ok = bear_pin or bear_eng
 
-        # F. AI Features & Scoring
         norm_rsi = float(rsis[i]) / 100.0
         rel_vol = min(float(vols[i]) / float(vol_smas[i]), 3.0) / 3.0 if vol_smas[i] > 0 else 0.5
         cnd_qual = max(up_wick, lo_wick) / c_range if has_rng else 0.0
@@ -495,7 +493,6 @@ def run_strategy(
         bull_ai = compute_ai_score(norm_rsi, rel_vol, cnd_qual, bull_zn_f, bull_tl_f, True)
         bear_ai = compute_ai_score(norm_rsi, rel_vol, cnd_qual, bear_zn_f, bear_tl_f, False)
 
-        # G. Entry Logic
         bull_win = last_bull_sweep_bar is not None and (i - last_bull_sweep_bar < config["sweep_window"]) and c > last_bull_sweep_low
         bear_win = last_bear_sweep_bar is not None and (i - last_bear_sweep_bar < config["sweep_window"]) and c < last_bear_sweep_high
 
