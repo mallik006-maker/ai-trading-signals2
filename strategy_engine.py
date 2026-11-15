@@ -4,6 +4,14 @@ import yfinance as yf
 
 
 MARKET_WATCHLISTS = {
+    "Crypto": {
+        "BTC/USD": "BTC-USD",
+        "ETH/USD": "ETH-USD",
+        "SOL/USD": "SOL-USD",
+        "XRP/USD": "XRP-USD",
+        "BNB/USD": "BNB-USD",
+        "DOGE/USD": "DOGE-USD",
+    },
     "Indian Markets (NSE)": {
         "NIFTY 50": "^NSEI",
         "BANKNIFTY": "^NSEBANK",
@@ -25,18 +33,10 @@ MARKET_WATCHLISTS = {
         "USD/CAD": "USDCAD=X",
         "GOLD (Futures)": "GC=F",
     },
-    "Crypto": {
-        "BTC/USD": "BTC-USD",
-        "ETH/USD": "ETH-USD",
-        "SOL/USD": "SOL-USD",
-        "XRP/USD": "XRP-USD",
-        "BNB/USD": "BNB-USD",
-        "DOGE/USD": "DOGE-USD",
-    },
 }
 
 
-def _flatten_yf_df(df: pd.DataFrame) -> pd.DataFrame:
+def _flatten_yf_df(df: pd.DataFrame, target_tz: str = "Asia/Kolkata") -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame()
     if isinstance(df.columns, pd.MultiIndex):
@@ -51,27 +51,33 @@ def _flatten_yf_df(df: pd.DataFrame) -> pd.DataFrame:
     df.dropna(subset=["Open", "High", "Low", "Close"], inplace=True)
     df.index = pd.to_datetime(df.index)
     if df.index.tz is not None:
-        df.index = df.index.tz_localize(None)
+        df.index = df.index.tz_convert(target_tz).tz_localize(None)
     df.index = df.index.as_unit("ns")
     df.sort_index(inplace=True)
     return df
 
 
-def fetch_market_data(symbol: str, timeframe: str = "15m"):
-    """Fetch LTF intraday data, 1H data (for 4H HTF zones), and Daily data."""
+def fetch_ltf_data(symbol: str, timeframe: str = "15m", target_tz: str = "Asia/Kolkata") -> pd.DataFrame:
     period_map = {"5m": "30d", "15m": "60d", "30m": "60d", "1h": "60d"}
     ltf_period = period_map.get(timeframe, "60d")
+    return _flatten_yf_df(
+        yf.download(symbol, period=ltf_period, interval=timeframe, progress=False, auto_adjust=True),
+        target_tz=target_tz,
+    )
 
-    df_ltf = _flatten_yf_df(
-        yf.download(symbol, period=ltf_period, interval=timeframe, progress=False, auto_adjust=True)
+
+def fetch_1h_data(symbol: str, target_tz: str = "Asia/Kolkata") -> pd.DataFrame:
+    return _flatten_yf_df(
+        yf.download(symbol, period="60d", interval="1h", progress=False, auto_adjust=True),
+        target_tz=target_tz,
     )
-    df_1h = _flatten_yf_df(
-        yf.download(symbol, period="60d", interval="1h", progress=False, auto_adjust=True)
+
+
+def fetch_daily_data(symbol: str, target_tz: str = "Asia/Kolkata") -> pd.DataFrame:
+    return _flatten_yf_df(
+        yf.download(symbol, period="1y", interval="1d", progress=False, auto_adjust=True),
+        target_tz=target_tz,
     )
-    df_daily = _flatten_yf_df(
-        yf.download(symbol, period="1y", interval="1d", progress=False, auto_adjust=True)
-    )
-    return df_ltf, df_1h, df_daily
 
 
 def compute_atr(df: pd.DataFrame, length: int = 14) -> pd.Series:
@@ -113,9 +119,7 @@ def run_strategy(
     df["RSI"] = compute_rsi(df["Close"], 14).fillna(50.0)
     df["VolSMA"] = df["Volume"].rolling(20).mean().fillna(0.0)
 
-    # -------------------------------------------------
-    # 1. DAILY PIVOTS & DAILY SUPPLY/DEMAND (NON-REPAINTING)
-    # -------------------------------------------------
+    # 1. DAILY PIVOTS & DAILY SUPPLY/DEMAND
     d = df_daily.copy()
     d["dATR"] = compute_atr(d, 14)
     d["PP"] = (d["High"] + d["Low"] + d["Close"]) / 3.0
@@ -161,9 +165,7 @@ def run_strategy(
     for col in ["PP", "R1", "S1", "R2", "S2"]:
         df[col] = merged_d[col].values
 
-    # -------------------------------------------------
-    # 2. 4H HTF LIQUIDITY ZONES (NON-REPAINTING)
-    # -------------------------------------------------
+    # 2. 4H HTF LIQUIDITY ZONES
     htf_events = {}
     if not df_1h.empty:
         h4 = df_1h.resample("4h").agg(
@@ -197,9 +199,7 @@ def run_strategy(
     sorted_htf_times = sorted(htf_events.keys())
     htf_ptr = 0
 
-    # -------------------------------------------------
     # 3. BAR-BY-BAR SIMULATION
-    # -------------------------------------------------
     n = len(df)
     times = df.index
     opens = df["Open"].values
@@ -218,7 +218,6 @@ def run_strategy(
     active_sup, closed_sup = [], []
     active_htf_bsl, closed_htf_bsl = [], []
     active_htf_ssl, closed_htf_ssl = [], []
-
     bsl_pools, ssl_pools = [], []
 
     prev_pl, last_pl, active_up_tl, closed_tls = None, None, None, []
@@ -230,13 +229,13 @@ def run_strategy(
     ai_memory = []
     open_trade = None
     trades = []
-    signals_log = []
+    alerts_log = []  # Independent live alerts (never blocked by older open trades)
+    last_bull_alert_i = -10
+    last_bear_alert_i = -10
 
     sw_len = config["swing_len"]
     tl_len = config["tl_swing_len"]
-
     prev_day_key = None
-    bull_sweeps_idx, bear_sweeps_idx = [], []
     last_bull_ai, last_bear_ai = 50.0, 50.0
     last_zone_status = "NEUTRAL"
 
@@ -442,26 +441,18 @@ def run_strategy(
                 ssl_pools.remove(lvl)
 
         prev_c = float(closes[i - 1]) if i > 0 else c
-        bull_piv_sweep = any(
-            pd.notna(lvl) and l < lvl and c > lvl and (o > lvl or prev_c > lvl)
-            for lvl in [pp, s1, s2, r1, r2]
-        )
-        bear_piv_sweep = any(
-            pd.notna(lvl) and h > lvl and c < lvl and (o < lvl or prev_c < lvl)
-            for lvl in [pp, r1, r2, s1, s2]
-        )
+        bull_piv_sweep = any(pd.notna(lvl) and l < lvl and c > lvl and (o > lvl or prev_c > lvl) for lvl in [pp, s1, s2, r1, r2])
+        bear_piv_sweep = any(pd.notna(lvl) and h > lvl and c < lvl and (o < lvl or prev_c < lvl) for lvl in [pp, r1, r2, s1, s2])
 
         bull_sweep_ev = swept_ssl or bull_piv_sweep or htf_bull_sweep
         bear_sweep_ev = swept_bsl or bear_piv_sweep or htf_bear_sweep
 
         if bull_sweep_ev:
-            bull_sweeps_idx.append(i)
             last_bull_sweep_bar, last_bull_sweep_low = i, l
         elif last_bull_sweep_bar is not None and c < last_bull_sweep_low:
             last_bull_sweep_bar, last_bull_sweep_low = None, None
 
         if bear_sweep_ev:
-            bear_sweeps_idx.append(i)
             last_bear_sweep_bar, last_bear_sweep_high = i, h
         elif last_bear_sweep_bar is not None and c > last_bear_sweep_high:
             last_bear_sweep_bar, last_bear_sweep_high = None, None
@@ -520,57 +511,61 @@ def run_strategy(
             if is_long:
                 if bull_win: r.append("Liquidity/Pivot Sweep")
                 if in_buy_zone: r.append("Daily Buy Zone")
-                if in_htf_ssl: r.append("4H HTF SSL Zone")
+                if in_htf_ssl: r.append("4H HTF SSL")
                 if up_tl_bounce: r.append("Uptrend Bounce")
                 if dn_tl_break: r.append("Downtrend Break")
-                if bull_pin: r.append("Bull Pin Bar")
+                if bull_pin: r.append("Bull Pin")
                 if bull_eng: r.append("Bull Engulfing")
             else:
                 if bear_win: r.append("Liquidity/Pivot Sweep")
                 if in_sell_zone: r.append("Daily Sell Zone")
-                if in_htf_bsl: r.append("4H HTF BSL Zone")
+                if in_htf_bsl: r.append("4H HTF BSL")
                 if dn_tl_bounce: r.append("Downtrend Reject")
                 if up_tl_break: r.append("Uptrend Break")
-                if bear_pin: r.append("Bear Pin Bar")
+                if bear_pin: r.append("Bear Pin")
                 if bear_eng: r.append("Bear Engulfing")
             return " + ".join(r)
 
-        if long_sig and open_trade is None:
+        if long_sig and (i - last_bull_alert_i > 2):
             sl_anchor = last_bull_sweep_low if bull_win else float(np.min(lows[max(0, i - 2) : i + 1]))
             sl_p = sl_anchor - atr * config["sl_buffer_atr"]
             risk = c - sl_p
             if risk > 0:
                 tp_p = c + risk * config["rr_ratio"]
                 reasons = _build_reasons(True)
-                open_trade = {
-                    "side": "LONG", "entry_time": t, "entry_idx": i,
-                    "entry": c, "sl": sl_p, "tp": tp_p, "ai_score": bull_ai,
-                    "reasons": reasons,
-                    "features": (norm_rsi, rel_vol, cnd_qual, bull_zn_f, bull_tl_f),
-                }
-                signals_log.append({
-                    "time": t, "idx": i, "side": "BUY", "price": c,
-                    "sl": sl_p, "tp": tp_p, "ai_score": bull_ai, "reasons": reasons,
+                alerts_log.append({
+                    "time": t, "idx": i, "bars_ago": (n - 1) - i, "side": "BUY",
+                    "price": c, "sl": sl_p, "tp": tp_p, "ai_score": bull_ai, "reasons": reasons,
                 })
+                last_bull_alert_i = i
+                if open_trade is None:
+                    open_trade = {
+                        "side": "LONG", "entry_time": t, "entry_idx": i,
+                        "entry": c, "sl": sl_p, "tp": tp_p, "ai_score": bull_ai,
+                        "reasons": reasons,
+                        "features": (norm_rsi, rel_vol, cnd_qual, bull_zn_f, bull_tl_f),
+                    }
                 last_bull_sweep_bar, last_bull_sweep_low = None, None
 
-        elif short_sig and open_trade is None:
+        elif short_sig and (i - last_bear_alert_i > 2):
             sl_anchor = last_bear_sweep_high if bear_win else float(np.max(highs[max(0, i - 2) : i + 1]))
             sl_p = sl_anchor + atr * config["sl_buffer_atr"]
             risk = sl_p - c
             if risk > 0:
                 tp_p = c - risk * config["rr_ratio"]
                 reasons = _build_reasons(False)
-                open_trade = {
-                    "side": "SHORT", "entry_time": t, "entry_idx": i,
-                    "entry": c, "sl": sl_p, "tp": tp_p, "ai_score": bear_ai,
-                    "reasons": reasons,
-                    "features": (norm_rsi, rel_vol, cnd_qual, bear_zn_f, bear_tl_f),
-                }
-                signals_log.append({
-                    "time": t, "idx": i, "side": "SELL", "price": c,
-                    "sl": sl_p, "tp": tp_p, "ai_score": bear_ai, "reasons": reasons,
+                alerts_log.append({
+                    "time": t, "idx": i, "bars_ago": (n - 1) - i, "side": "SELL",
+                    "price": c, "sl": sl_p, "tp": tp_p, "ai_score": bear_ai, "reasons": reasons,
                 })
+                last_bear_alert_i = i
+                if open_trade is None:
+                    open_trade = {
+                        "side": "SHORT", "entry_time": t, "entry_idx": i,
+                        "entry": c, "sl": sl_p, "tp": tp_p, "ai_score": bear_ai,
+                        "reasons": reasons,
+                        "features": (norm_rsi, rel_vol, cnd_qual, bear_zn_f, bear_tl_f),
+                    }
                 last_bear_sweep_bar, last_bear_sweep_high = None, None
 
         if i == n - 1:
@@ -581,25 +576,26 @@ def run_strategy(
             elif in_htf_bsl: last_zone_status = "4H HTF BSL"
             else: last_zone_status = "NEUTRAL"
 
+    now_tz = pd.Timestamp.now(tz=config["timezone"]).tz_localize(None)
+    mins_ago = max(0, int((now_tz - times[-1]).total_seconds() // 60))
+    market_live = mins_ago <= 90
+
     wins_cnt = sum(1 for tr in trades if tr["pnl_r"] > 0)
     win_rate = (wins_cnt / len(trades) * 100.0) if trades else 0.0
     ai_mem_wr = (sum(m[5] for m in ai_memory) / len(ai_memory) * 100.0) if ai_memory else 0.0
 
     return {
         "df": df,
-        "active_dem": active_dem, "closed_dem": closed_dem,
-        "active_sup": active_sup, "closed_sup": closed_sup,
-        "active_htf_bsl": active_htf_bsl, "closed_htf_bsl": closed_htf_bsl,
-        "active_htf_ssl": active_htf_ssl, "closed_htf_ssl": closed_htf_ssl,
-        "active_up_tl": active_up_tl, "active_dn_tl": active_dn_tl, "closed_tls": closed_tls,
-        "bull_sweeps_idx": bull_sweeps_idx, "bear_sweeps_idx": bear_sweeps_idx,
-        "signals": signals_log, "trades": trades, "open_trade": open_trade,
+        "active_dem": active_dem, "active_sup": active_sup,
+        "active_htf_bsl": active_htf_bsl, "active_htf_ssl": active_htf_ssl,
+        "active_up_tl": active_up_tl, "active_dn_tl": active_dn_tl,
+        "signals": alerts_log, "trades": trades, "open_trade": open_trade,
         "stats": {
             "last_price": float(closes[-1]),
             "last_time": times[-1],
+            "mins_ago": mins_ago,
+            "market_live": market_live,
             "pp": float(pps[-1]) if pd.notna(pps[-1]) else np.nan,
-            "r1": float(r1s[-1]) if pd.notna(r1s[-1]) else np.nan,
-            "s1": float(s1s[-1]) if pd.notna(s1s[-1]) else np.nan,
             "bias": "BULLISH (>PP)" if (pd.notna(pps[-1]) and closes[-1] > pps[-1]) else "BEARISH (<PP)",
             "zone_status": last_zone_status,
             "bull_ai": last_bull_ai, "bear_ai": last_bear_ai,
