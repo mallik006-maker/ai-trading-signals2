@@ -28,7 +28,7 @@ if "sent_alerts" not in st.session_state:
     st.session_state["sent_alerts"] = set()
 
 
-@st.cache_data(ttl=25, show_spinner=False)
+@st.cache_data(ttl=20, show_spinner=False)
 def cached_ltf(symbol: str, timeframe: str, tz_name: str):
     return fetch_ltf_data(symbol, timeframe, tz_name)
 
@@ -71,9 +71,9 @@ display_title = active_symbol if custom_ticker.strip() else f"{selected_name} ({
 
 timeframe = st.sidebar.selectbox("Chart Timeframe", ["5m", "15m", "30m", "1h"], index=1)
 tz_choice = st.sidebar.selectbox("Display Timezone", ["Asia/Kolkata", "UTC"], index=0)
-auto_refresh_choice = st.sidebar.selectbox("Live Auto-Refresh", ["Off", "30s", "60s", "5m"], index=2)
-fresh_bars_limit = st.sidebar.slider("Fresh Alert Window (Candles)", 1, 10, 4)
-bars_to_show = st.sidebar.slider("Visible Candles on Chart", 80, 400, 160, 20)
+auto_refresh_choice = st.sidebar.selectbox("Auto-Refresh", ["Off", "60s", "5m"], index=0)
+fresh_bars_limit = st.sidebar.slider("Fresh Alert Window (Candles)", 1, 15, 5)
+bars_to_show = st.sidebar.slider("Visible Candles on Chart", 80, 350, 140, 20)
 
 with st.sidebar.expander("Strategy & Zone Settings", expanded=False):
     entry_mode = st.selectbox(
@@ -88,8 +88,8 @@ with st.sidebar.expander("Strategy & Zone Settings", expanded=False):
 
 with st.sidebar.expander("Inbuilt AI Settings", expanded=False):
     use_ai = st.checkbox("Enable k-NN Self-Learning AI", value=True)
-    use_ai_filter = st.checkbox("Filter by Min AI Confidence %", value=True)
-    min_ai_conf = st.slider("Min AI Confidence %", 0, 90, 50, 5)
+    use_ai_filter = st.checkbox("Filter by Min AI Confidence %", value=False)
+    min_ai_conf = st.slider("Min AI Confidence %", 0, 90, 45, 5)
     ai_knn = st.slider("k-NN Neighbors", 3, 15, 5)
 
 with st.sidebar.expander("Telegram Auto-Alerts", expanded=False):
@@ -121,32 +121,34 @@ config = {
     "sl_buffer_atr": 0.25,
 }
 
-if st.sidebar.button("Force Refresh Now", width="stretch"):
-    st.cache_data.clear()
-
 run_every_val = None if auto_refresh_choice == "Off" else auto_refresh_choice
 
 # ==========================================
-# HEADER
+# HEADER & TOP REFRESH BUTTON
 # ==========================================
-st.title("AI Live Trading Signals: Forex · Crypto · Indian Markets")
-now_str = pd.Timestamp.now(tz=tz_choice).strftime("%d %b %Y, %H:%M:%S")
-st.caption(f"Current Time ({tz_choice}): {now_str}  |  Auto-Refresh: {auto_refresh_choice}")
+h_col1, h_col2 = st.columns([4, 1])
+with h_col1:
+    st.title("AI Live Trading Signals: Forex · Crypto · Indian Markets")
+    now_str = pd.Timestamp.now(tz=tz_choice).strftime("%d %b %Y, %H:%M:%S")
+    st.caption(f"Current Time ({tz_choice}): {now_str}  |  Auto-Refresh: {auto_refresh_choice}")
+with h_col2:
+    st.write("")
+    if st.button("🔄 Refresh Live Now", type="primary", width="stretch"):
+        st.cache_data.clear()
+        st.rerun()
 
 
 @st.fragment(run_every=run_every_val)
 def live_terminal_fragment():
     tab_alerts, tab_chart, tab_scanner = st.tabs(
-        ["Live Alerts Feed (Auto-Updating)", "Live Chart & AI Analyzer", "Full Multi-Market Scan"]
+        ["Live Alerts Feed", "Live Chart & AI Analyzer", "Full Multi-Market Scan"]
     )
 
     # ------------------------------------------
-    # TAB 1: AUTO-UPDATING LIVE ALERTS FEED
+    # TAB 1: LIVE ALERTS FEED (SORTED NEWEST FIRST)
     # ------------------------------------------
     with tab_alerts:
-        st.subheader(f"Live Alerts Monitor — {market_cat} ({timeframe})")
-        st.caption("Automatically refreshes live candles, highlights fresh signals, and pushes Telegram alerts if enabled.")
-
+        st.subheader(f"Live Alerts — {market_cat} ({timeframe})")
         watch_items = list(MARKET_WATCHLISTS[market_cat].items())
         alert_rows = []
         fresh_cards = []
@@ -159,17 +161,20 @@ def live_terminal_fragment():
                 stt = r["stats"]
                 sigs = r["signals"]
                 latest = sigs[-1] if sigs else None
-                mkt_badge = f"🟢 LIVE ({stt['mins_ago']}m ago)" if stt["market_live"] else f"🔴 CLOSED ({stt['last_time'].strftime('%d %b %H:%M')})"
+                last_c_str = stt["last_time"].strftime("%d %b %H:%M")
+                mkt_badge = f"🟢 LIVE ({stt['mins_ago']}m ago)" if stt["market_live"] else f"🔴 CLOSED ({last_c_str})"
 
                 if latest is not None:
                     bars_ago = latest["bars_ago"]
                     is_fresh = bars_ago <= fresh_bars_limit
-                    sig_tag = f"🔥 FRESH {latest['side']} ({bars_ago} bars ago)" if is_fresh else f"{latest['side']} ({bars_ago} bars ago)"
+                    sig_tag = f"🔥 FRESH {latest['side']}" if is_fresh else f"{latest['side']}"
                     alert_rows.append({
                         "Instrument": f"{nm} ({sym})",
                         "Market Status": mkt_badge,
-                        "Price": round(stt["last_price"], 4 if stt["last_price"] < 200 else 2),
-                        "Latest Alert": sig_tag,
+                        "Last Candle": last_c_str,
+                        "Live Price": round(stt["last_price"], 4 if stt["last_price"] < 200 else 2),
+                        "Signal": sig_tag,
+                        "Bars Ago": int(bars_ago),
                         "Alert Time": latest["time"].strftime("%d %b %H:%M"),
                         "AI %": round(latest["ai_score"], 1),
                         "Entry": round(latest["price"], 4 if latest["price"] < 200 else 2),
@@ -180,7 +185,7 @@ def live_terminal_fragment():
                     })
 
                     if is_fresh:
-                        fresh_cards.append((nm, sym, latest, mkt_badge))
+                        fresh_cards.append((nm, sym, latest, mkt_badge, stt["last_price"]))
                         alert_key = f"{sym}_{timeframe}_{latest['side']}_{latest['time']}"
                         if auto_tg and tg_token and tg_chat_id and latest["bars_ago"] <= 1 and alert_key not in st.session_state["sent_alerts"]:
                             tg_msg = (
@@ -195,8 +200,10 @@ def live_terminal_fragment():
                     alert_rows.append({
                         "Instrument": f"{nm} ({sym})",
                         "Market Status": mkt_badge,
-                        "Price": round(stt["last_price"], 4 if stt["last_price"] < 200 else 2),
-                        "Latest Alert": "WAIT (No recent setup)",
+                        "Last Candle": last_c_str,
+                        "Live Price": round(stt["last_price"], 4 if stt["last_price"] < 200 else 2),
+                        "Signal": "WAIT",
+                        "Bars Ago": 9999,
                         "Alert Time": "-",
                         "AI %": round(max(stt["bull_ai"], stt["bear_ai"]), 1),
                         "Entry": None, "SL": None, "TP": None,
@@ -208,20 +215,20 @@ def live_terminal_fragment():
 
         if fresh_cards:
             st.markdown(f"### 🔥 Fresh Alerts (Within Last {fresh_bars_limit} Candles)")
-            for nm, sym, lt, badge in fresh_cards:
+            for nm, sym, lt, badge, cur_p in fresh_cards:
                 cls = "sig-buy" if lt["side"] == "BUY" else "sig-sell"
                 st.markdown(
-                    f"<div class='{cls}'><b>🔥 {lt['side']} — {nm} ({sym})</b> &nbsp;|&nbsp; {badge}<br>"
+                    f"<div class='{cls}'><b>🔥 {lt['side']} — {nm} ({sym})</b> &nbsp;|&nbsp; {badge} &nbsp;|&nbsp; <b>Current Price:</b> {cur_p:,.4f}<br>"
                     f"<b>Entry:</b> {lt['price']:,.4f} &nbsp;|&nbsp; <b>SL:</b> {lt['sl']:,.4f} &nbsp;|&nbsp; <b>TP:</b> {lt['tp']:,.4f} &nbsp;|&nbsp; "
-                    f"<b>AI:</b> {lt['ai_score']:.1f}% &nbsp;|&nbsp; <b>Time:</b> {lt['time'].strftime('%d %b %H:%M')} ({lt['bars_ago']} bars ago)<br>"
+                    f"<b>AI:</b> {lt['ai_score']:.1f}% &nbsp;|&nbsp; <b>Alert Time:</b> {lt['time'].strftime('%d %b %H:%M')} ({lt['bars_ago']} bars ago)<br>"
                     f"<b>Setup:</b> {lt['reasons']}</div>",
                     unsafe_allow_html=True,
                 )
         else:
-            st.info(f"No fresh signals in the last {fresh_bars_limit} candles for {market_cat}. Latest prior signals are listed below.")
+            st.info(f"No signals in the last {fresh_bars_limit} candles for {market_cat}. Latest setups sorted newest-first below:")
 
         if alert_rows:
-            adf = pd.DataFrame(alert_rows).sort_values(by=["Alert Time", "AI %"], ascending=[False, False])
+            adf = pd.DataFrame(alert_rows).sort_values(by=["Bars Ago", "AI %"], ascending=[True, False])
             st.dataframe(adf, width="stretch", hide_index=True)
 
     # ------------------------------------------
@@ -238,7 +245,8 @@ def live_terminal_fragment():
             df = res["df"]
             sigs = res["signals"]
             latest_sig = sigs[-1] if sigs else None
-            mkt_str = f"🟢 LIVE ({stats['mins_ago']}m ago)" if stats["market_live"] else f"🔴 CLOSED (Last: {stats['last_time'].strftime('%d %b %H:%M')})"
+            last_c_str = stats["last_time"].strftime("%d %b %H:%M")
+            mkt_str = f"🟢 LIVE ({stats['mins_ago']}m ago | {last_c_str})" if stats["market_live"] else f"🔴 CLOSED ({last_c_str})"
 
             c1, c2, c3, c4, c5 = st.columns(5)
             c1.metric("Last Price", f"{stats['last_price']:,.4f}" if stats["last_price"] < 200 else f"{stats['last_price']:,.2f}", mkt_str)
@@ -259,7 +267,7 @@ def live_terminal_fragment():
             elif latest_sig is not None:
                 st.markdown(
                     f"<div class='sig-wait'><b>WAIT — Monitoring {display_title} ({mkt_str})</b><br>"
-                    f"Most recent alert: <b>{latest_sig['side']}</b> @ {latest_sig['price']:,.4f} on {latest_sig['time'].strftime('%d %b %H:%M')} "
+                    f"Latest alert: <b>{latest_sig['side']}</b> @ {latest_sig['price']:,.4f} on {latest_sig['time'].strftime('%d %b %H:%M')} "
                     f"({latest_sig['bars_ago']} bars ago) — AI: {latest_sig['ai_score']:.1f}% ({latest_sig['reasons']})</div>",
                     unsafe_allow_html=True,
                 )
@@ -355,7 +363,7 @@ def live_terminal_fragment():
     # TAB 3: FULL MULTI-MARKET SCANNER
     # ------------------------------------------
     with tab_scanner:
-        st.subheader("Full Multi-Market Scan (India + Forex + Crypto)")
+        st.subheader("Full Multi-Market Scan (Crypto + Forex + India)")
         scan_cats = st.multiselect("Markets to Scan", list(MARKET_WATCHLISTS.keys()), default=list(MARKET_WATCHLISTS.keys()))
         if st.button("Run Full Market Scan Now", type="primary"):
             items = [(cat, nm, sym) for cat in scan_cats for nm, sym in MARKET_WATCHLISTS[cat].items()]
@@ -367,14 +375,17 @@ def live_terminal_fragment():
                     if r is not None:
                         stt = r["stats"]
                         latest = r["signals"][-1] if r["signals"] else None
-                        badge = f"🟢 LIVE ({stt['mins_ago']}m)" if stt["market_live"] else f"🔴 CLOSED ({stt['last_time'].strftime('%d %b %H:%M')})"
+                        last_c_str = stt["last_time"].strftime("%d %b %H:%M")
+                        badge = f"🟢 LIVE ({stt['mins_ago']}m)" if stt["market_live"] else f"🔴 CLOSED ({last_c_str})"
                         rows.append({
                             "Market": cat,
                             "Instrument": f"{nm} ({sym})",
                             "Status": badge,
-                            "Price": round(stt["last_price"], 4 if stt["last_price"] < 200 else 2),
-                            "Latest Signal": f"{latest['side']} ({latest['bars_ago']} bars ago)" if latest else "WAIT",
-                            "Signal Time": latest["time"].strftime("%d %b %H:%M") if latest else "-",
+                            "Last Candle": last_c_str,
+                            "Live Price": round(stt["last_price"], 4 if stt["last_price"] < 200 else 2),
+                            "Latest Signal": latest["side"] if latest else "WAIT",
+                            "Bars Ago": int(latest["bars_ago"]) if latest else 9999,
+                            "Alert Time": latest["time"].strftime("%d %b %H:%M") if latest else "-",
                             "AI %": round(latest["ai_score"], 1) if latest else round(max(stt["bull_ai"], stt["bear_ai"]), 1),
                             "Entry": round(latest["price"], 4 if latest["price"] < 200 else 2) if latest else None,
                             "SL": round(latest["sl"], 4 if latest["sl"] < 200 else 2) if latest else None,
@@ -387,7 +398,7 @@ def live_terminal_fragment():
                 prog.progress((idx + 1) / max(1, len(items)))
 
             if rows:
-                scan_df = pd.DataFrame(rows).sort_values(by=["Signal Time", "AI %"], ascending=[False, False])
+                scan_df = pd.DataFrame(rows).sort_values(by=["Bars Ago", "AI %"], ascending=[True, False])
                 st.dataframe(scan_df, width="stretch", hide_index=True)
             else:
                 st.warning("No instruments returned data.")
