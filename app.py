@@ -320,7 +320,6 @@ def live_multi_chart_fragment():
                     "Setup": latest["reasons"],
                 })
 
-                # Auto-send Telegram alert on fresh signals
                 alert_key = f"{sym}_{timeframe}_{latest['side']}_{latest['time']}"
                 if auto_tg and tg_token and tg_chat_id and bars_ago <= 1 and alert_key not in st.session_state["sent_alerts"]:
                     tg_msg = (
@@ -359,7 +358,7 @@ def live_multi_chart_fragment():
     cols = st.columns(2) if use_grid else None
 
     for idx, (nm, sym, r, badge, last_c_str) in enumerate(results):
-        target_container = cols[idx % 2] if use_grid else st
+        target_container = cols[idx % 2] if use_grid else st.container()
         with target_container:
             stt = r["stats"]
             sigs = r["signals"]
