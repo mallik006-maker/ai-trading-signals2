@@ -12,6 +12,15 @@ MARKET_WATCHLISTS = {
         "BNB/USD": "BNB-USD",
         "DOGE/USD": "DOGE-USD",
     },
+    "Forex & Gold": {
+        "EUR/USD": "EURUSD=X",
+        "GBP/USD": "GBPUSD=X",
+        "USD/JPY": "USDJPY=X",
+        "USD/INR": "USDINR=X",
+        "AUD/USD": "AUDUSD=X",
+        "USD/CAD": "USDCAD=X",
+        "GOLD (Futures)": "GC=F",
+    },
     "Indian Markets (NSE)": {
         "NIFTY 50": "^NSEI",
         "BANKNIFTY": "^NSEBANK",
@@ -23,15 +32,6 @@ MARKET_WATCHLISTS = {
         "SBIN": "SBIN.NS",
         "ITC": "ITC.NS",
         "L&T": "LT.NS",
-    },
-    "Forex & Gold": {
-        "EUR/USD": "EURUSD=X",
-        "GBP/USD": "GBPUSD=X",
-        "USD/JPY": "USDJPY=X",
-        "USD/INR": "USDINR=X",
-        "AUD/USD": "AUDUSD=X",
-        "USD/CAD": "USDCAD=X",
-        "GOLD (Futures)": "GC=F",
     },
 }
 
@@ -58,26 +58,20 @@ def _flatten_yf_df(df: pd.DataFrame, target_tz: str = "Asia/Kolkata") -> pd.Data
 
 
 def fetch_ltf_data(symbol: str, timeframe: str = "15m", target_tz: str = "Asia/Kolkata") -> pd.DataFrame:
-    period_map = {"5m": "30d", "15m": "60d", "30m": "60d", "1h": "60d"}
-    ltf_period = period_map.get(timeframe, "60d")
-    return _flatten_yf_df(
-        yf.download(symbol, period=ltf_period, interval=timeframe, progress=False, auto_adjust=True),
-        target_tz=target_tz,
-    )
+    period_map = {"5m": "15d", "15m": "20d", "30m": "30d", "1h": "45d"}
+    ltf_period = period_map.get(timeframe, "20d")
+    raw = yf.Ticker(symbol).history(period=ltf_period, interval=timeframe, auto_adjust=True)
+    return _flatten_yf_df(raw, target_tz=target_tz)
 
 
 def fetch_1h_data(symbol: str, target_tz: str = "Asia/Kolkata") -> pd.DataFrame:
-    return _flatten_yf_df(
-        yf.download(symbol, period="60d", interval="1h", progress=False, auto_adjust=True),
-        target_tz=target_tz,
-    )
+    raw = yf.Ticker(symbol).history(period="45d", interval="1h", auto_adjust=True)
+    return _flatten_yf_df(raw, target_tz=target_tz)
 
 
 def fetch_daily_data(symbol: str, target_tz: str = "Asia/Kolkata") -> pd.DataFrame:
-    return _flatten_yf_df(
-        yf.download(symbol, period="1y", interval="1d", progress=False, auto_adjust=True),
-        target_tz=target_tz,
-    )
+    raw = yf.Ticker(symbol).history(period="6mo", interval="1d", auto_adjust=True)
+    return _flatten_yf_df(raw, target_tz=target_tz)
 
 
 def compute_atr(df: pd.DataFrame, length: int = 14) -> pd.Series:
@@ -229,22 +223,22 @@ def run_strategy(
     ai_memory = []
     open_trade = None
     trades = []
-    alerts_log = []  # Independent live alerts (never blocked by older open trades)
+    alerts_log = []
     last_bull_alert_i = -10
     last_bear_alert_i = -10
 
     sw_len = config["swing_len"]
     tl_len = config["tl_swing_len"]
     prev_day_key = None
-    last_bull_ai, last_bear_ai = 50.0, 50.0
+    last_bull_ai, last_bear_ai = 55.0, 55.0
     last_zone_status = "NEUTRAL"
 
     def compute_ai_score(f1, f2, f3, f4, f5, is_long):
-        zone_pts = 10.0 + f4 * 25.0
+        zone_pts = 30.0 + f4 * 25.0
         tl_pts = f5 * 15.0
-        cnd_pts = min(f3 * 30.0, 25.0)
-        vol_pts = f2 * 15.0
-        rsi_pts = (1.0 - f1) * 10.0 if is_long else f1 * 10.0
+        cnd_pts = min(f3 * 20.0, 15.0)
+        vol_pts = f2 * 10.0
+        rsi_pts = (1.0 - f1) * 5.0 if is_long else f1 * 5.0
         struct_score = min(zone_pts + tl_pts + cnd_pts + vol_pts + rsi_pts, 100.0)
 
         if config["use_ai"] and len(ai_memory) >= config["ai_knn"]:
@@ -254,7 +248,7 @@ def run_strategy(
             dists = np.linalg.norm(mem_feats - cur, axis=1)
             k_idx = np.argsort(dists)[: config["ai_knn"]]
             knn_prob = float(np.mean(mem_outs[k_idx]) * 100.0)
-            return 0.40 * struct_score + 0.60 * knn_prob
+            return 0.50 * struct_score + 0.50 * knn_prob
         return struct_score
 
     for i in range(n):
@@ -263,6 +257,7 @@ def run_strategy(
         atr = float(atrs[i]) if not np.isnan(atrs[i]) and atrs[i] > 0 else (h - l + 1e-6)
         pp, r1, s1, r2, s2 = pps[i], r1s[i], s1s[i], r2s[i], s2s[i]
 
+        # Shadow trade tracking for continuous AI self-learning
         if open_trade is not None:
             hit_sl = (l <= open_trade["sl"]) if open_trade["side"] == "LONG" else (h >= open_trade["sl"])
             hit_tp = (h >= open_trade["tp"]) if open_trade["side"] == "LONG" else (l <= open_trade["tp"])
@@ -469,9 +464,11 @@ def run_strategy(
         prev_o = float(opens[i - 1]) if i > 0 else o
         bull_eng = i > 0 and c > o and prev_c < prev_o and c >= prev_o and o <= prev_c and c_body > abs(prev_c - prev_o)
         bear_eng = i > 0 and c < o and prev_c > prev_o and c <= prev_o and o >= prev_c and c_body > abs(prev_c - prev_o)
+        bull_strong = has_rng and c > o and c >= h - c_range * 0.35
+        bear_strong = has_rng and c < o and c <= l + c_range * 0.35
 
-        bull_cnd_ok = bull_pin or bull_eng
-        bear_cnd_ok = bear_pin or bear_eng
+        bull_cnd_ok = bull_pin or bull_eng or bull_strong
+        bear_cnd_ok = bear_pin or bear_eng or bear_strong
 
         norm_rsi = float(rsis[i]) / 100.0
         rel_vol = min(float(vols[i]) / float(vol_smas[i]), 3.0) / 3.0 if vol_smas[i] > 0 else 0.5
@@ -500,11 +497,11 @@ def run_strategy(
         bull_bias_ok = (not config["use_pp_bias"]) or (pd.notna(pp) and c > pp)
         bear_bias_ok = (not config["use_pp_bias"]) or (pd.notna(pp) and c < pp)
 
+        raw_long_sig = bull_setup and (bull_cnd_ok or dn_tl_break) and bull_bias_ok
+        raw_short_sig = bear_setup and (bear_cnd_ok or up_tl_break) and bear_bias_ok
+
         bull_ai_ok = (not config["use_ai_filter"]) or (bull_ai >= config["min_ai_conf"])
         bear_ai_ok = (not config["use_ai_filter"]) or (bear_ai >= config["min_ai_conf"])
-
-        long_sig = bull_setup and (bull_cnd_ok or dn_tl_break) and bull_bias_ok and bull_ai_ok
-        short_sig = bear_setup and (bear_cnd_ok or up_tl_break) and bear_bias_ok and bear_ai_ok
 
         def _build_reasons(is_long):
             r = []
@@ -515,7 +512,8 @@ def run_strategy(
                 if up_tl_bounce: r.append("Uptrend Bounce")
                 if dn_tl_break: r.append("Downtrend Break")
                 if bull_pin: r.append("Bull Pin")
-                if bull_eng: r.append("Bull Engulfing")
+                elif bull_eng: r.append("Bull Engulfing")
+                elif bull_strong: r.append("Strong Bull Close")
             else:
                 if bear_win: r.append("Liquidity/Pivot Sweep")
                 if in_sell_zone: r.append("Daily Sell Zone")
@@ -523,49 +521,59 @@ def run_strategy(
                 if dn_tl_bounce: r.append("Downtrend Reject")
                 if up_tl_break: r.append("Uptrend Break")
                 if bear_pin: r.append("Bear Pin")
-                if bear_eng: r.append("Bear Engulfing")
+                elif bear_eng: r.append("Bear Engulfing")
+                elif bear_strong: r.append("Strong Bear Close")
             return " + ".join(r)
 
-        if long_sig and (i - last_bull_alert_i > 2):
+        # Continuous shadow training so AI never freezes on old history
+        if raw_long_sig and open_trade is None:
             sl_anchor = last_bull_sweep_low if bull_win else float(np.min(lows[max(0, i - 2) : i + 1]))
             sl_p = sl_anchor - atr * config["sl_buffer_atr"]
             risk = c - sl_p
             if risk > 0:
-                tp_p = c + risk * config["rr_ratio"]
-                reasons = _build_reasons(True)
-                alerts_log.append({
-                    "time": t, "idx": i, "bars_ago": (n - 1) - i, "side": "BUY",
-                    "price": c, "sl": sl_p, "tp": tp_p, "ai_score": bull_ai, "reasons": reasons,
-                })
-                last_bull_alert_i = i
-                if open_trade is None:
-                    open_trade = {
-                        "side": "LONG", "entry_time": t, "entry_idx": i,
-                        "entry": c, "sl": sl_p, "tp": tp_p, "ai_score": bull_ai,
-                        "reasons": reasons,
-                        "features": (norm_rsi, rel_vol, cnd_qual, bull_zn_f, bull_tl_f),
-                    }
-                last_bull_sweep_bar, last_bull_sweep_low = None, None
-
-        elif short_sig and (i - last_bear_alert_i > 2):
+                open_trade = {
+                    "side": "LONG", "entry_time": t, "entry_idx": i,
+                    "entry": c, "sl": sl_p, "tp": c + risk * config["rr_ratio"],
+                    "ai_score": bull_ai, "reasons": _build_reasons(True),
+                    "features": (norm_rsi, rel_vol, cnd_qual, bull_zn_f, bull_tl_f),
+                }
+        elif raw_short_sig and open_trade is None:
             sl_anchor = last_bear_sweep_high if bear_win else float(np.max(highs[max(0, i - 2) : i + 1]))
             sl_p = sl_anchor + atr * config["sl_buffer_atr"]
             risk = sl_p - c
             if risk > 0:
-                tp_p = c - risk * config["rr_ratio"]
-                reasons = _build_reasons(False)
+                open_trade = {
+                    "side": "SHORT", "entry_time": t, "entry_idx": i,
+                    "entry": c, "sl": sl_p, "tp": c - risk * config["rr_ratio"],
+                    "ai_score": bear_ai, "reasons": _build_reasons(False),
+                    "features": (norm_rsi, rel_vol, cnd_qual, bear_zn_f, bear_tl_f),
+                }
+
+        # Emit alert independently of open_trade
+        if raw_long_sig and bull_ai_ok and (i - last_bull_alert_i > 2):
+            sl_anchor = last_bull_sweep_low if bull_win else float(np.min(lows[max(0, i - 2) : i + 1]))
+            sl_p = sl_anchor - atr * config["sl_buffer_atr"]
+            risk = c - sl_p
+            if risk > 0:
+                alerts_log.append({
+                    "time": t, "idx": i, "bars_ago": (n - 1) - i, "side": "BUY",
+                    "price": c, "sl": sl_p, "tp": c + risk * config["rr_ratio"],
+                    "ai_score": bull_ai, "reasons": _build_reasons(True),
+                })
+                last_bull_alert_i = i
+                last_bull_sweep_bar, last_bull_sweep_low = None, None
+
+        elif raw_short_sig and bear_ai_ok and (i - last_bear_alert_i > 2):
+            sl_anchor = last_bear_sweep_high if bear_win else float(np.max(highs[max(0, i - 2) : i + 1]))
+            sl_p = sl_anchor + atr * config["sl_buffer_atr"]
+            risk = sl_p - c
+            if risk > 0:
                 alerts_log.append({
                     "time": t, "idx": i, "bars_ago": (n - 1) - i, "side": "SELL",
-                    "price": c, "sl": sl_p, "tp": tp_p, "ai_score": bear_ai, "reasons": reasons,
+                    "price": c, "sl": sl_p, "tp": c - risk * config["rr_ratio"],
+                    "ai_score": bear_ai, "reasons": _build_reasons(False),
                 })
                 last_bear_alert_i = i
-                if open_trade is None:
-                    open_trade = {
-                        "side": "SHORT", "entry_time": t, "entry_idx": i,
-                        "entry": c, "sl": sl_p, "tp": tp_p, "ai_score": bear_ai,
-                        "reasons": reasons,
-                        "features": (norm_rsi, rel_vol, cnd_qual, bear_zn_f, bear_tl_f),
-                    }
                 last_bear_sweep_bar, last_bear_sweep_high = None, None
 
         if i == n - 1:
